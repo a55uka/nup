@@ -203,9 +203,10 @@ def parse_file(toc: bytes, pos: int) -> tuple[tuple[int, int], int, bytes, int, 
     (off, ln, size, eoff, esz, sha, codec, cflags, _r4) = \
         _file_s.unpack_from(toc, pos)
     pos += FILE_SIZE
-    if codec not in Codec:
-        raise NupError(f"unknown extent codec {codec}")
-    codec = Codec(codec)
+    try:  # `int in Enum` needs Python 3.12+; Codec() works on 3.10+
+        codec = Codec(codec)
+    except ValueError:
+        raise NupError(f"unknown extent codec {codec}") from None
     if cflags != 0:
         raise NupError(f"unknown codec_flags {cflags}")
     if size == 0 and (eoff != 0 or esz != 0 or codec != CODEC_RAW):

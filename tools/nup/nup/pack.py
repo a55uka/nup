@@ -14,7 +14,7 @@ import hashlib
 import os
 import struct
 import sys
-from typing import IO, TYPE_CHECKING, TypedDict, NotRequired
+from typing import IO, TYPE_CHECKING, TypedDict
 
 try:
     import zstandard
@@ -275,11 +275,12 @@ def _split_groups(
     return groups
 
 
-class PackMeta(TypedDict):
-    names: NotRequired[dict[str | None, str] | None]
-    icons: NotRequired[dict[str | None, str] | None]
-    display_version: NotRequired[str | None]
-    publisher: NotRequired[str | None]
+class PackMeta(TypedDict, total=False):
+    # total=False rather than NotRequired[...]: same meaning, works on 3.10.
+    names: dict[str | None, str] | None
+    icons: dict[str | None, str] | None
+    display_version: str | None
+    publisher: str | None
     
 
 def pack(
