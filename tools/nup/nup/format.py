@@ -52,7 +52,7 @@ KIND_NAMES: Final = {
 
 # Meta TLV types (SPEC §5)
 class TVL(IntEnum):
-    NPDM = 0
+    NPDM = 0x0001
     NACP = auto()
     ICON = auto()
     DISPLAY_VERSION = auto()
@@ -62,6 +62,8 @@ class TVL(IntEnum):
     SOURCE_DUMP = auto()
     LOCALIZED_TITLES = auto()
     LOCALIZED_ICONS = auto()
+
+assert TVL.NPDM.value == 0x0001 and TVL.LOCALIZED_ICONS.value == 0x000A  # SPEC §5
 
 TLV_NPDM: Final = TVL.NPDM
 TLV_NACP: Final = TVL.NACP
