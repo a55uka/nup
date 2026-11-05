@@ -316,8 +316,14 @@ def pack(
     # own NPDM and provenance.
     app_metadata = PackMeta(names=names, icons=icons, display_version=display_version,
                             publisher=publisher)
-    for group_path, group in groups:
-        meta = app_metadata if any(p.kind == F.KIND_BASE for p in group) else {}
+    # Base-less dumps (README): metadata goes to the first package instead.
+    has_base = any(p.kind == F.KIND_BASE for p in packages)
+    for gi, (group_path, group) in enumerate(groups):
+        if has_base:
+            carries = any(p.kind == F.KIND_BASE for p in group)
+        else:
+            carries = gi == 0
+        meta = app_metadata if carries else {}
         _pack_container(
             group_path,
             src,
