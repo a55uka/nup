@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 import time
-from typing import TYPE_CHECKING 
+from typing import TYPE_CHECKING
 
 from . import format as F
 from .access import app_meta, build_id, extract_tree, find_package, iter_children, \
@@ -80,6 +80,13 @@ def _print_tree(r: NupReader, dir_index: int, prefix: str, max_depth: int, depth
             print(f"{prefix}{label}  [{size} B, {tag}]")
 
 
+def _warn_legacy_meta(r: NupReader, path: str) -> None:
+    if r.legacy_meta:
+        print(f"nup: note: {path} has meta TLV IDs one below SPEC §5 (packed after #20); "
+              f"read as corrected here, other tools may misread them. "
+              f"`nup fix-meta {path}` fixes it in place.", file=sys.stderr)
+
+
 def _cmd_info(args: argparse.Namespace) -> int:
     with NupReader(args.file) as r:
         s = r.super
@@ -132,6 +139,7 @@ def _cmd_info(args: argparse.Namespace) -> int:
             if p.romfs_dir != F.NO_DIR:
                 print(f"      romfs/  (top {args.depth} levels)")
                 _print_tree(r, p.romfs_dir, "        ", args.depth, show_files=False)
+        _warn_legacy_meta(r, args.file)
     return 0
 
 
@@ -192,6 +200,8 @@ def _kind_arg(name: str) -> int | None:
 def _cmd_verify(args: argparse.Namespace) -> int:
     ok, problems = verify(args.file, deep=not args.fast)
     if ok:
+        with NupReader(args.file) as r:
+            _warn_legacy_meta(r, args.file)
         print(f"verify: OK ({'deep' if not args.fast else 'fast'}) - {args.file}")
         return 0
     print(f"verify: FAILED - {args.file}")
@@ -255,10 +265,19 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_verify)
 
     args = ap.parse_args(argv)
+    nup_file = getattr(args, "file", None)
+    if nup_file is not None and os.path.isdir(nup_file):
+        hint = "use `nup pack` to turn a dump folder into a .nup" if args.cmd == "info" else ""
+        print(f"nup: error: {nup_file!r} is a folder, expected a .nup file"
+              + (f"; {hint}" if hint else ""), file=sys.stderr)
+        return 2
     try:
         return int(args.fn(args))
     except F.NupError as e:
         print(f"nup: error: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"nup: error: {e.strerror or e}: {e.filename!r}", file=sys.stderr)
         return 2
 
 

@@ -6,7 +6,11 @@ is preserved byte-for-byte, per-package meta_offset/meta_size are patched
 in the TOC, the TOC is re-hashed and the superblock rewritten. The UUID
 is unaffected (SPEC §2.1 covers only title_id/version/kind). Edits merge
 into the existing metadata: unspecified TLVs are preserved, and package
-level TLVs (NPDM, build ID, source dump) are always kept.
+level TLVs (NPDM, build ID, source dump) are always kept. Blocks written
+with the shifted TLV IDs (meta.is_legacy_block) are renumbered on edit.
+
+`fix-meta` repairs those shifted IDs without copying the file: it rewrites
+only the 2-byte type of each record, in place.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import struct
 import time
 from typing import Final
 
@@ -30,6 +35,12 @@ def _old_block(r: NupReader, pkg: PackageInfo) -> bytes:
     if not pkg.meta_size:
         return b""
     return bytes(r._mm[pkg.meta_offset:pkg.meta_offset + pkg.meta_size])
+
+
+def _records(r: NupReader, pkg: PackageInfo) -> dict[int, bytes]:
+    """Parsed meta block with SPEC §5 types, renumbering a legacy block."""
+    records = M.parse_block(_old_block(r, pkg))
+    return M.upgrade_records(records) if pkg.index in r.legacy_meta else records
 
 
 def _resolve_package(r: NupReader, package: str | None) -> PackageInfo:
@@ -51,7 +62,7 @@ def _resolve_package(r: NupReader, package: str | None) -> PackageInfo:
         raise SystemExit(f"edit: unknown package {package!r} "
                          f"(kind name or index expected)")
     for p in r.packages:
-        if p.meta_size and any(t in M.parse_block(_old_block(r, p)) for t in APP_TLVS):
+        if p.meta_size and any(t in _records(r, p) for t in APP_TLVS):
             return p
     return next((p for p in r.packages if p.kind == F.KIND_BASE), r.packages[0])
 
@@ -82,7 +93,7 @@ def edit(path: str, *, package: str | None = None, name: str | None = None,
         r = NupReader(path)  # full validation before anything is written
         try:
             target = _resolve_package(r, package)
-            records = [M.parse_block(_old_block(r, p)) for p in r.packages]
+            records = [_records(r, p) for p in r.packages]
             idx = r.packages.index(target)
             records[idx] = M.merge_app_meta(
                 records[idx], name=name, publisher=publisher,
@@ -150,6 +161,50 @@ def edit(path: str, *, package: str | None = None, name: str | None = None,
         raise
 
 
+def fix_legacy_meta(path: str, *, dry_run: bool = False) -> list[PackageInfo]:
+    """Renumber shifted meta TLV types (meta.is_legacy_block) in place.
+
+    Meta blocks sit outside the TOC hash and the per-file hashes, and record
+    sizes do not change, so only the 2-byte type of each affected record is
+    rewritten. Every change is planned and checked before the first write;
+    each block is then written back in one call. Returns the packages fixed.
+    """
+    patches: dict[int, bytes] = {}  # absolute block offset -> patched block
+    fixed: list[PackageInfo] = []
+    with NupReader(path) as r:
+        for p in r.packages:
+            if p.index not in r.legacy_meta:
+                continue
+            fixed.append(p)
+            if p.meta_offset in patches:  # block shared with another package
+                continue
+            block = bytearray(_old_block(r, p))
+            types: list[int] = []
+            for pos, t, _payload in M.iter_tlvs(bytes(block)):
+                new = M.upgrade_type(t)
+                struct.pack_into("<H", block, pos, new)
+                types.append(new)
+            if len(set(types)) != len(types):
+                raise F.NupError(f"package {p.index}: renumbering would duplicate "
+                                 f"a TLV type; file left unchanged")
+            patches[p.meta_offset] = bytes(block)
+    if dry_run or not patches:
+        return fixed
+
+    with open(path, "r+b") as fh:
+        for offset, data in sorted(patches.items()):
+            fh.seek(offset)
+            fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    with NupReader(path) as r:  # TOC hash is untouched; confirm the result
+        if r.legacy_meta:
+            raise F.NupError(f"packages {sorted(r.legacy_meta)} still read as "
+                             f"shifted after the rewrite")
+    return fixed
+
+
 def _parse_langs(items: list[str] | None, what: str) -> dict[str, str]:
     """--lang-* items: LANG=VALUE sets, LANG= (empty value) removes."""
     out: dict[str, str] = {}
@@ -179,8 +234,19 @@ def cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def fix_cmd(args: argparse.Namespace) -> int:
+    fixed = fix_legacy_meta(args.file, dry_run=args.dry_run)
+    if not fixed:
+        print(f"fix-meta: nothing to fix, TLV IDs already match SPEC §5 in {args.file}")
+        return 0
+    verb = "would renumber" if args.dry_run else "renumbered"
+    for p in fixed:
+        print(f"fix-meta: {verb} meta TLVs of {p.kind_name} package {p.title_id:016X}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Wire the `edit` subcommand into the CLI."""
+    """Wire the `edit` and `fix-meta` subcommands into the CLI."""
     p = sub.add_parser("edit", help="edit package metadata in an existing .nup")
     p.add_argument("file")
     p.add_argument("--package", help="target package: kind name or index "
@@ -199,3 +265,10 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
                    help="remove the display version TLV")
     p.add_argument("--clear-icon", action="store_true", help="remove the icon TLV")
     p.set_defaults(fn=cmd)
+
+    p = sub.add_parser("fix-meta", help="fix meta TLV IDs written one too low "
+                                        "(files packed after #20), in place")
+    p.add_argument("file")
+    p.add_argument("--dry-run", action="store_true",
+                   help="report what would change without writing")
+    p.set_defaults(fn=fix_cmd)
