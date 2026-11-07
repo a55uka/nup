@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 import time
-from typing import TYPE_CHECKING 
+from typing import TYPE_CHECKING
 
 from . import format as F
 from .access import app_meta, build_id, extract_tree, find_package, iter_children, \
@@ -255,10 +255,19 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_verify)
 
     args = ap.parse_args(argv)
+    nup_file = getattr(args, "file", None)
+    if nup_file is not None and os.path.isdir(nup_file):
+        hint = "use `nup pack` to turn a dump folder into a .nup" if args.cmd == "info" else ""
+        print(f"nup: error: {nup_file!r} is a folder, expected a .nup file"
+              + (f"; {hint}" if hint else ""), file=sys.stderr)
+        return 2
     try:
         return int(args.fn(args))
     except F.NupError as e:
         print(f"nup: error: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"nup: error: {e.strerror or e}: {e.filename!r}", file=sys.stderr)
         return 2
 
 

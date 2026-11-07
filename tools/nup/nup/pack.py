@@ -14,7 +14,7 @@ import hashlib
 import os
 import struct
 import sys
-from typing import IO, TYPE_CHECKING, TypedDict, NotRequired
+from typing import IO, TYPE_CHECKING, TypedDict
 
 try:
     import zstandard
@@ -275,11 +275,12 @@ def _split_groups(
     return groups
 
 
-class PackMeta(TypedDict):
-    names: NotRequired[dict[str | None, str] | None]
-    icons: NotRequired[dict[str | None, str] | None]
-    display_version: NotRequired[str | None]
-    publisher: NotRequired[str | None]
+class PackMeta(TypedDict, total=False):
+    # total=False rather than NotRequired[...]: same meaning, works on 3.10.
+    names: dict[str | None, str] | None
+    icons: dict[str | None, str] | None
+    display_version: str | None
+    publisher: str | None
     
 
 def pack(
@@ -316,8 +317,14 @@ def pack(
     # own NPDM and provenance.
     app_metadata = PackMeta(names=names, icons=icons, display_version=display_version,
                             publisher=publisher)
-    for group_path, group in groups:
-        meta = app_metadata if any(p.kind == F.KIND_BASE for p in group) else {}
+    # Base-less dumps (README): metadata goes to the first package instead.
+    has_base = any(p.kind == F.KIND_BASE for p in packages)
+    for gi, (group_path, group) in enumerate(groups):
+        if has_base:
+            carries = any(p.kind == F.KIND_BASE for p in group)
+        else:
+            carries = gi == 0
+        meta = app_metadata if carries else {}
         _pack_container(
             group_path,
             src,

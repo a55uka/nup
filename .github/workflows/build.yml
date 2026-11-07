@@ -1,0 +1,219 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Run the package from source on every supported OS and Python version.
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: python -m pip install ./tools/nup
+
+      - name: Smoke test
+        run: bash .github/scripts/smoke.sh nup
+
+  # Strict mypy, using the config and version pin in tools/nup/pyproject.toml.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.10"
+
+      - name: Install
+        run: python -m pip install "./tools/nup[tools]"
+
+      - name: mypy
+        working-directory: tools/nup
+        run: python -m mypy
+
+  # Standalone single-file binaries (no Python needed to run them).
+  binary:
+    name: binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64, exe: .exe }
+          - { os: windows-11-arm, target: windows-arm64, exe: .exe }
+          - { os: ubuntu-22.04, target: linux-x64, exe: "" }
+          - { os: ubuntu-22.04-arm, target: linux-arm64, exe: "" }
+          - { os: macos-15-intel, target: macos-x64, exe: "" }
+          - { os: macos-latest, target: macos-arm64, exe: "" }
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install nup and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ./tools/nup pyinstaller
+
+      - name: Build
+        run: |
+          printf 'import sys\n\nfrom nup.cli import main\n\nif __name__ == "__main__":\n  sys.exit(main())\n' > nup_entry.py
+          pyinstaller --onefile --console --name nup --clean --noconfirm \
+            --hidden-import zstandard --collect-submodules nup nup_entry.py
+
+      - name: Smoke test
+        run: bash .github/scripts/smoke.sh "dist/nup${{ matrix.exe }}"
+
+      - name: Rename and checksum
+        run: |
+          mkdir -p out
+          name="nup-${{ matrix.target }}${{ matrix.exe }}"
+          cp "dist/nup${{ matrix.exe }}" "out/$name"
+          python -c "import hashlib,sys; p=sys.argv[1]; print(hashlib.sha256(open(p,'rb').read()).hexdigest() + '  ' + p.split('/')[-1])" "out/$name" | tee "out/$name.sha256"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: nup-${{ matrix.target }}
+          path: out/*
+
+  # Pure-Python wheel for `pip install`.
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir out tools/nup
+
+      - name: Test the built wheel
+        run: |
+          python -m pip install out/*.whl
+          bash .github/scripts/smoke.sh nup
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: nup-wheel
+          path: out/*.whl
+
+  # On a v* tag, publish every binary and the wheel to a GitHub Release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, typecheck, binary, wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Combined checksums
+        run: cat release/*.sha256 > release/SHA256SUMS.txt && cat release/SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v3.0.3
+        with:
+          generate_release_notes: true
+          # release/ holds only downloaded artifacts + SHA256SUMS.txt. One glob,
+          # so no file is matched twice (the wheel is also named nup-*).
+          files: release/*
+
+  # On every push to the default branch (or a manual run on it), replace the
+  # `nightly` prerelease with this commit's builds. Download links stay stable:
+  #   https://github.com/<owner>/<repo>/releases/download/nightly/nup-windows-x64.exe
+  nightly:
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [test, typecheck, binary, wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # A newer push supersedes an in-flight nightly publish.
+    concurrency:
+      group: nightly-release
+      cancel-in-progress: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Combined checksums
+        run: cat release/*.sha256 > release/SHA256SUMS.txt && cat release/SHA256SUMS.txt
+
+      - name: Write release notes
+        run: |
+          {
+            echo "Automated build of \`${GITHUB_SHA::7}\` on \`${GITHUB_REF_NAME}\`, $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo
+            echo "> $(git log -1 --format=%s)"
+            echo
+            echo "This is a development build and may be unstable. Tagged \`v*\` releases are the stable ones."
+            echo
+            echo "[Build run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          } > notes.md
+          cat notes.md
+
+      - name: Move the nightly tag to this commit
+        run: |
+          git tag -f nightly "$GITHUB_SHA"
+          git push -f origin refs/tags/nightly
+
+      - name: Recreate the nightly release
+        run: |
+          # Recreate rather than edit so stale assets never linger and the
+          # release date matches the build. Keep the tag (it was just moved).
+          # release/* matches each file once; the wheel is also named nup-*,
+          # so separate nup-* and *.whl globs would upload it twice (HTTP 422).
+          # Delete every release on the nightly tag, drafts included (a failed
+          # upload can leave a draft that tag lookups don't find).
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == "nightly") | .id' |
+            while read -r id; do
+              echo "Deleting old nightly release $id"
+              gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            done
+          gh release create nightly \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "Nightly (${GITHUB_SHA::7})" \
+            --notes-file notes.md \
+            release/*

@@ -55,6 +55,8 @@ def decode_localized(payload: bytes) -> dict[bytes, bytes]:
     while pos < len(payload):
         lang_len = payload[pos]
         pos += 1
+        if pos + lang_len + 4 > len(payload):
+            raise F.NupError("localized record header overruns TLV")
         lang = payload[pos:pos + lang_len]
         pos += lang_len
         (data_len,) = struct.unpack_from("<I", payload, pos)
