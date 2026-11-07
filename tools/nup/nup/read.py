@@ -16,6 +16,7 @@ import struct
 from typing import TYPE_CHECKING
 
 from . import format as F
+from . import meta as M
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -52,7 +53,8 @@ class NodeRef:
 
 
 class NupReader:
-    __slots__ = ("path", "_fh", "_mm", "super", "dir_count", "file_count", "pool", "packages", "files", "dirs", "children")
+    __slots__ = ("path", "_fh", "_mm", "super", "dir_count", "file_count", "pool", "packages", "files", "dirs", "children",
+                 "legacy_meta")
     def __init__(self, path: str) -> None:
         self.path = path
         self._fh = open(path, "rb")
@@ -80,6 +82,7 @@ class NupReader:
                 raise F.NupError("TOC SHA-256 mismatch - file corrupt or tampered")
             self._parse_toc(raw_toc)
             self._check_bounds()
+            self.legacy_meta = self._find_legacy_meta()
         except BaseException:
             # Never leak an open handle/mmap: on Windows it locks the file
             # against rename/delete until GC.
@@ -195,6 +198,21 @@ class NupReader:
                 raise F.NupError(
                     f"package {p.index}: update without base in container and "
                     f"standalone_update flag not set")
+
+    def _find_legacy_meta(self) -> frozenset[int]:
+        """Indices of packages whose meta block uses the shifted TLV IDs
+        (M.is_legacy_block). A malformed block is left for the metadata
+        accessors to report, so it never stops the container from opening."""
+        legacy: set[int] = set()
+        for p in self.packages:
+            if not p.meta_size:
+                continue
+            try:
+                if M.is_legacy_block(self._mm[p.meta_offset:p.meta_offset + p.meta_size]):
+                    legacy.add(p.index)
+            except F.NupError:
+                continue
+        return frozenset(legacy)
 
     # ---- member access ----
 

@@ -9,9 +9,18 @@ records are sorted by TLV type and written without padding.
 from __future__ import annotations
 
 import struct
-from typing import Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from . import format as F
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+# Containers packed between #20 and the TLV ID fix numbered meta types from
+# 0 (NPDM) to 9 (localized icons), one below SPEC §5. The highest type that
+# tool wrote; a legacy block's types 0..LEGACY_MAX_TYPE are each one too low.
+LEGACY_MAX_TYPE: Final = F.TVL.LOCALIZED_ICONS - 1
+BUILD_ID_SIZE: Final = 32
 
 
 class MetaSource(Protocol):
@@ -26,17 +35,49 @@ def read_file(path: str) -> bytes:
         return fh.read()
 
 
-def parse_block(block: bytes) -> dict[int, bytes]:
-    """TLV type -> payload for one meta block (first occurrence wins)."""
-    out: dict[int, bytes] = {}
+def iter_tlvs(block: bytes) -> Iterator[tuple[int, int, bytes]]:
+    """(record offset in block, type, payload) for each TLV, as stored."""
     pos = 0
     while pos + 8 <= len(block):
         t, _r, size = F._tlv_s.unpack_from(block, pos)
         if pos + 8 + size > len(block):
             raise F.NupError("meta TLV overruns block")
-        out.setdefault(t, bytes(block[pos + 8:pos + 8 + size]))
+        yield pos, t, bytes(block[pos + 8:pos + 8 + size])
         pos += 8 + size
+
+
+def parse_block(block: bytes) -> dict[int, bytes]:
+    """TLV type -> payload for one meta block (first occurrence wins)."""
+    out: dict[int, bytes] = {}
+    for _pos, t, payload in iter_tlvs(block):
+        out.setdefault(t, payload)
     return out
+
+
+def is_legacy_block(block: bytes) -> bool:
+    """True if a meta block uses the shifted TLV IDs (see LEGACY_MAX_TYPE).
+
+    Type 0 is not a registered type, so a type 0 record (NPDM) marks one.
+    Blocks without an NPDM are caught by type 0x0007: in SPEC §5 it is the
+    32-byte build ID, but a shifted block stores the source dump name there.
+    """
+    first: dict[int, bytes] = {}
+    for _pos, t, payload in iter_tlvs(block):
+        if t == 0:
+            return True
+        first.setdefault(t, payload)
+    bid = first.get(F.TLV_BUILD_ID)
+    return bid is not None and len(bid) != BUILD_ID_SIZE
+
+
+def upgrade_type(t: int) -> int:
+    """Spec-correct type for a TLV type read from a legacy block."""
+    return t + 1 if t <= LEGACY_MAX_TYPE else t
+
+
+def upgrade_records(records: dict[int, bytes]) -> dict[int, bytes]:
+    """Renumber a legacy block's parsed records to SPEC §5 types."""
+    return {upgrade_type(t): payload for t, payload in records.items()}
 
 
 def serialize_block(records: dict[int, bytes]) -> bytes:

@@ -123,6 +123,26 @@ Merge semantics: flags you provide override, everything else is preserved - incl
 NPDM, build ID and source-dump provenance. `edit` cannot change `title_id`, `version`,
 `kind` or flags (those are package-record fields covered by the UUID).
 
+### Fixing metadata in files packed after #20
+
+Containers packed by `nup` between #20 and the TLV ID fix store every meta TLV type one
+below SPEC §5 (NPDM as `0`, title name as `0x0004`, and so on), so other readers show the
+wrong fields. Their contents and hashes are fine, and `nup` reads them correctly, noting the
+shifted IDs in `info` and `verify`. To fix them for other tools without repacking:
+
+```
+nup fix-meta game.nup --dry-run   # report what would change
+nup fix-meta game.nup             # rewrite the TLV types in place
+```
+
+Only the 2-byte type of each meta record changes: meta blocks are outside the TOC hash and
+the per-file hashes, so the rest of the file is untouched and no copy is made. A file that
+is already correct is left alone. `nup edit` also renumbers a block when it rewrites it.
+
+A meta block is read as shifted if it has a type `0` record (not a registered type), or a
+`0x0007` record that is not the 32-byte build ID (shifted blocks store the source dump name
+there).
+
 ### Verifying
 
 ```

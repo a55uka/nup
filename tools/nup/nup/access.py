@@ -64,17 +64,19 @@ def find_child(r: NupReader, dir_index: int, name: bytes) -> NodeRef | None:
     return None
 
 
-def meta_records(r: NupReader, pkg: PackageInfo) -> list[tuple[int, bytes]]:
-    out = []
-    pos = 0
+def raw_meta_records(r: NupReader, pkg: PackageInfo) -> list[tuple[int, bytes]]:
+    """(TLV type, payload) exactly as stored in the package's meta block."""
     block = r._mm[pkg.meta_offset:pkg.meta_offset + pkg.meta_size]
-    while pos + 8 <= len(block):
-        t, _r, size = F._tlv_s.unpack_from(block, pos)
-        if pos + 8 + size > len(block):
-            raise F.NupError("meta TLV overruns block")
-        out.append((t, bytes(block[pos + 8:pos + 8 + size])))
-        pos += 8 + size
-    return out
+    return [(t, payload) for _pos, t, payload in M.iter_tlvs(block)]
+
+
+def meta_records(r: NupReader, pkg: PackageInfo) -> list[tuple[int, bytes]]:
+    """(TLV type, payload) with SPEC §5 types. Blocks written with the
+    shifted IDs (M.is_legacy_block) are read one type up."""
+    records = raw_meta_records(r, pkg)
+    if pkg.index in r.legacy_meta:
+        return [(M.upgrade_type(t), payload) for t, payload in records]
+    return records
 
 
 def _localized(r: NupReader, pkg: PackageInfo, tlv_type: int) -> dict[bytes, bytes]:
