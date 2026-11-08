@@ -116,7 +116,8 @@ file-table hashes.
             - covers magic, entry table, string table
 0x038  u32  reserved (zero)
 0x03C  u32  feature flags (zero in v2.0; readers MUST reject unknown
-            bits - bit allocation happens when a feature needs one)
+            bits - bit allocation happens when a feature needs one;
+            bit0 = RomFS image present, see §7.1)
 
 then P package records, fixed part 0x68 bytes:
   0x00  u8    kind     0 = base, 1 = update (patch), 2 = add-on
@@ -363,11 +364,42 @@ Emulators SHOULD default to bind + lazy.
   wrapper, no NSO/CTR layers; dumps arrive decrypted and v2 stores what
   the CPU loads.
 - **RomFS**: stored as the extracted tree, `.zs`/SARC payloads verbatim.
-  Re-pack to IVFC only if a tool needs the on-disc image.
+  Re-pack to IVFC only if a tool needs the on-disc image. A package MAY
+  additionally carry a contiguous RomFS image (§7.1).
 - `main.npdm` stays at `exefs/main.npdm`. The build id TLV comes from the
   `main` NSO header at pack time; mods and cheats tooling keys on it.
 - Icons, names and publisher live only in meta.nup TLVs, never as entries.
 - Dump-tool artifacts (`.listing` etc.) MUST NOT be packed.
+
+### 7.1 Optional RomFS image **[OPEN]**
+
+A base package MAY carry its RomFS as one raw image, byte-identical to the
+RomFS the game sees, next to the per-file tree:
+
+```
+base/romfs.img     raw RomFS image (path to be agreed)
+```
+
+- Stored raw (no codec), so a read at RomFS offset X is a read at
+  `image entry offset + X` in the container: no path lookup and no
+  per-file open. Games read the RomFS by offset (table once at mount,
+  then data, often as 16 KiB sequential reads), so this is the access
+  pattern it serves.
+- The entry starts at a 64 KiB-aligned offset from the start of the file
+  (stricter than the 0x200 entry alignment; 64 KiB matches the Windows
+  mapping granularity, not tuned against other values), so it can be
+  memory-mapped in place.
+- Presence is signalled by feature flag bit0 (§3). Readers that know the
+  bit use the image; readers that do not MUST reject the file per §3, so
+  a packer SHOULD offer the feature as an explicit opt-in.
+- The image is a derived view of the same bytes as the file tree. It is a
+  normal file-table entry (whole-file hash, content hash row), so every
+  integrity layer in §6 applies unchanged. Whether the tree and the
+  image must both be stored is **[OPEN]** (§10 item 11).
+- Update packages do not carry an image. A reader that wants image reads
+  against an updated title must build the merged image from the
+  materialized tree.
+
 
 ## 8. Worked example - Donkey Kong Bananza
 
@@ -465,6 +497,24 @@ Packing that update dump alone emits one base container, display version
    title with several programs packs each as its own container keyed
    by application id (issue #9.6). Whether the format should model
    multi-program titles natively is open.
+11. **RomFS image entry (§7.1).** Open points: (a) store tree and image
+   both (larger file, tools unchanged) or the image only for opted-in
+   packages (smaller, tools must reconstruct files from the RomFS
+   table); (b) updates - a full replacement image per update version
+   loses the diff-package size win, a diff scheme for the image is
+   unspecified; (c) image bytes are not deduplicable across packages the
+   way per-file entries are; (d) whether 64 KiB is the right alignment.
+   Measurements from a comparable layout (an independent NUP v2
+   implementation with a custom superblock, not this container; one
+   title,
+   FEFW 1.1.1, one Windows NVMe machine, warm cache), image reads vs a
+   loose per-file folder: reads <= 64 KiB 23 us vs ~600 us, reads over
+   4 MiB 4.4 ms vs 26-38 ms; size +0.6% (29,126,155,308 vs
+   28,946,251,968 bytes) vs per-file zstd, whose whole-file decode
+   stalled 361-939 ms on a 200+ MiB file that compressed only 3-13%.
+   Cold first boot was SSD-bound with no difference. Not measured:
+   end-to-end load time, memory use, and any of this against this
+   container.
 
 ---
 
