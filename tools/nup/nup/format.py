@@ -52,16 +52,17 @@ KIND_NAMES: Final = {
 
 # Meta TLV types (SPEC §5)
 class TVL(IntEnum):
-    NPDM = 0
-    NACP = auto()
-    ICON = auto()
-    DISPLAY_VERSION = auto()
-    TITLE_NAME = auto()
-    PUBLISHER = auto()
-    BUILD_ID = auto()
-    SOURCE_DUMP = auto()
-    LOCALIZED_TITLES = auto()
-    LOCALIZED_ICONS = auto()
+    # Explicit values: these are the on-disk type numbers of SPEC section 5, which start at 1
+    NPDM = 0x0001
+    NACP = 0x0002
+    ICON = 0x0003
+    DISPLAY_VERSION = 0x0004
+    TITLE_NAME = 0x0005
+    PUBLISHER = 0x0006
+    BUILD_ID = 0x0007
+    SOURCE_DUMP = 0x0008
+    LOCALIZED_TITLES = 0x0009
+    LOCALIZED_ICONS = 0x000A
 
 TLV_NPDM: Final = TVL.NPDM
 TLV_NACP: Final = TVL.NACP
