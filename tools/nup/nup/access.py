@@ -81,7 +81,10 @@ def _localized(r: NupReader, pkg: PackageInfo, tlv_type: int) -> dict[bytes, byt
     out: dict[bytes, bytes] = {}
     for t, payload in meta_records(r, pkg):
         if t == tlv_type:
-            out.update(M.decode_localized(payload))
+            try:
+                out.update(M.decode_localized(payload))
+            except F.NupError:
+                out[b""] = payload
     return out
 
 
