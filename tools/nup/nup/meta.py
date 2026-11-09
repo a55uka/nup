@@ -52,15 +52,21 @@ def decode_localized(payload: bytes) -> dict[bytes, bytes]:
     """Parse a LocalizedRecord sequence (SPEC §5.1) into {lang tag: data}."""
     out: dict[bytes, bytes] = {}
     pos = 0
-    while pos < len(payload):
+    n = len(payload)
+    while pos < n:
         lang_len = payload[pos]
         pos += 1
+        if pos + lang_len + 4 > n:
+            raise F.NupError(
+                f"localized record header overruns TLV at offset {pos - 1} "
+                f"(lang_len={lang_len}, payload={n} bytes)"
+            )
         lang = payload[pos:pos + lang_len]
         pos += lang_len
         (data_len,) = struct.unpack_from("<I", payload, pos)
         pos += 4
-        if pos + data_len > len(payload):
-            raise F.NupError("localized record overruns TLV")
+        if pos + data_len > n:
+            raise F.NupError("localized record data overruns TLV")
         out[lang.lower()] = payload[pos:pos + data_len]
         pos += data_len
     return out
