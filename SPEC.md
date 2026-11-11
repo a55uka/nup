@@ -278,7 +278,7 @@ Readers must skip unknown types. Registered types:
 | 0x8000–0xFFFF | vendor/tool private | readers skip |
 
 ### 5.1 Localized records (types 0x0009 / 0x000A)
-Japanese title shows `ゼルダの伝説` on a `ja` console, `The Legend of Zelda` on `en-US`.
+A Japanese title shows `ゼルダの伝説` on a `ja` console, `The Legend of Zelda` on `en-US`.
 These types carry that data as a sequence of records filling the payload up to `size`:
 
 ```c
