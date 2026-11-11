@@ -96,7 +96,7 @@ Extracted files are decompressed automatically (zstd) and land with their tree s
 
 ### Editing metadata after packing
 
-`edit` rewrites a package's meta block - contents and extents are untouched,
+`edit` rewrites a package's meta block - contents and extents are untouched;
 the file is validated before an atomic replace.
 
 ```
