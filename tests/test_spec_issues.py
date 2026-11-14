@@ -9,7 +9,7 @@ import struct
 
 import pytest
 
-from conftest import BASE_TITLE_ID, pack_base
+from conftest import BASE_TITLE_ID, make_dump, pack_base, pack_update
 from nup.layout import SPEC_ISSUES
 from nup.reader import read_container
 
@@ -103,20 +103,25 @@ def test_issue_worked_example_arithmetic():
 
 
 def test_issue_switch2_title_ids(base_dump, tmp_path):
-    """SPEC §4 assumes 0100… ids in dumps; real Switch 2 NPDMs carry 0400…
-    ACI0 program ids (and update dumps repeat the base id).  Resolution:
-    normalize 0400… -> 0100… and derive patch ids as application + 0x800."""
-    from nup.identity import normalize_title_id, parse_npdm_program_id
+    """Switch 2 programs have 0400… ids, which their signed ACID requires, and
+    update dumps repeat the base id.  Resolution (revised 2026-11-13): ids stay
+    as the console has them, in their range; patch ids are application + 0x800."""
+    from nup.identity import parse_npdm_program_id, title_number
 
-    npdm = (base_dump / "exefs" / "main.npdm").read_bytes()
-    program_id = parse_npdm_program_id(npdm)
-    assert program_id >> 56 == 0x01
-    assert normalize_title_id((0x0400_74A0_1BF1_2000)) == BASE_TITLE_ID
-    out = pack_base(base_dump, tmp_path / "b.nup", title_id=f"{BASE_TITLE_ID:x}")
-    with read_container(str(out)) as reader:
+    assert parse_npdm_program_id((base_dump / "exefs" / "main.npdm").read_bytes()) == BASE_TITLE_ID
+    switch2 = BASE_TITLE_ID & 0x00FF_FFFF_FFFF_FFFF | 0x0400_0000_0000_0000
+    s2_base = make_dump(tmp_path / "s2-base", title_id=switch2, seed=b"s2 base")
+    (s2_base / "romfs" / "a.bin").write_bytes(b"base")
+    s2_update = make_dump(tmp_path / "s2-update", title_id=switch2, seed=b"s2 update")   # the base id again
+    (s2_update / "romfs" / "a.bin").write_bytes(b"update")
+    base_out = pack_base(s2_base, tmp_path / "s2.nup")
+    update_out = pack_update(s2_update, base_out, tmp_path / "s2.update.65536.nup", 65536)
+    with read_container(str(base_out)) as reader:
+        assert reader.meta.packages[0].title_id == switch2
+    with read_container(str(update_out)) as reader:
         record = reader.meta.packages[0]
-        assert record.title_id == BASE_TITLE_ID
-        assert record.title_id & 0x000F_FFFF_FFFF_F000
+        assert (record.title_id, record.application_id) == (switch2 + 0x800, switch2)
+    assert title_number(0x040015100B514001) == title_number(0x010015100B514000) + 1   # a Switch 2 Edition's program 1
 
 
 def test_two_package_containers_must_be_base_plus_update(base_dump, tmp_path):

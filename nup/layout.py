@@ -38,13 +38,17 @@ class Kind(enum.IntEnum):
     BASE = 0
     UPDATE = 1
     ADDON = 2
+    ADDON_UPDATE = 3
 
 
 KIND_SCOPE_PREFIX = {
     Kind.BASE: "base",
     Kind.UPDATE: "update/{version}",
     Kind.ADDON: "addon/{index}",
+    Kind.ADDON_UPDATE: "addonupdate/{index}/{version}",
 }
+
+DIFF_KINDS = frozenset({Kind.UPDATE, Kind.ADDON_UPDATE})
 
 
 class Flags(enum.IntFlag):
@@ -72,18 +76,28 @@ TEXT_TLV_TYPES = frozenset(
     }
 )
 
-TLV_MAX_LENGTH = 0xFFFF
+TLV_TYPE_MAX = 0xFFFF
+TLV_MAX_LENGTH = 0x100000   # one TLV value at most 1 MiB: room for console icons (150-250 KB) with a bound readers check (SPEC §3, §6.4)
+TLV_HEADER = struct.Struct("<HHI")   # type, reserved (zero), length: v1's meta block framing
+TLV_HEADER_SIZE = TLV_HEADER.size
 
 CONTAINER_HEADER = struct.Struct("<4sIII")
 CONTAINER_ENTRY = struct.Struct("<QQIIQ32s")
 META_HEADER = struct.Struct("<4sHHIIQ32sII")
-PACKAGE_RECORD = struct.Struct("<BBHQQII32s32sQI")
+# kind, flags, program index, reserved, tlv size, title, application, version, file count, content hash, base content hash, first entry index
+PACKAGE_RECORD = struct.Struct("<BBBBIQQII32s32sQ")
 assert CONTAINER_HEADER.size == HEADER_SIZE
 assert CONTAINER_ENTRY.size == ENTRY_SIZE
 assert META_HEADER.size == META_HEADER_SIZE
 assert PACKAGE_RECORD.size == PACKAGE_FIXED_SIZE
 
 U64 = struct.Struct("<Q")
+
+# Title id arithmetic (SPEC §4, §5.4): an update's id is its program's + 0x800,
+# an add-on's the application's + 0x1000 + index, a data patch's its add-on's + 0x800
+PATCH_OFFSET = 0x800
+ADDON_OFFSET = 0x1000
+PROGRAM_INDEX_MAX = 0xFF  # the package record's u8 (SPEC §4.1)
 
 
 SPEC_ISSUES: dict[str, str] = {
@@ -126,8 +140,16 @@ SPEC_ISSUES: dict[str, str] = {
     ),
     "localized-tlv-framing": (
         "SPEC §3 describes the localized TLVs only as 'lang bytes + value', "
-        "with no length framing.  Resolution: the v1 convention is carried "
-        "over: u8 lang length, lang bytes, u16 value length, value bytes."
+        "with no length framing.  Resolution: u8 lang length, lang bytes, "
+        "u32 value length, value bytes (v1's u16 value length widened with "
+        "the TLV block, so localized icons fit: see tlv-size)."
+    ),
+    "tlv-size": (
+        "§10.3: a u16 TLV length and a u16 block size (64 KiB) cannot hold a "
+        "console icon (150-250 KB).  Decided 2026-11-13: the record's tlv "
+        "size is u32, a TLV is u16 type + u16 reserved + u32 length (v1's "
+        "meta block framing), one value is at most 1 MiB (TLV_MAX_LENGTH), "
+        "and the program index moved to record byte 0x02 to make room."
     ),
     "worked-example-counts": (
         "The draft §8 example said 1,306 changed / 3,452 total entries.  "
@@ -137,12 +159,28 @@ SPEC_ISSUES: dict[str, str] = {
         "exact; 1,306 was a typo and the totals followed from it.  SPEC.md "
         "§8 now carries the measured numbers."
     ),
+    "multi-program": (
+        "§10.10 left multi-program titles open.  Resolution (SPEC §4.1): "
+        "one program per container, the program index in the package "
+        "record's byte 0x02 (0x64 until the tlv size widened), the application id on another "
+        "program's base.  Part of v2, not a feature flag: every reader "
+        "keeps programs apart."
+    ),
+    "addon-update": (
+        "Add-on data patches (content meta 0x84) had no package kind.  "
+        "Resolution (SPEC §5.4): kind 3, a diff against its add-on bound by "
+        "base content hash like an update to its base, in its own "
+        "<name>.dlc.update.nup.  Part of v2: every reader applies them."
+    ),
     "switch2-title-id-namespace": (
-        "Switch 2 NPDMs carry program ids in the 0400… namespace and update "
-        "dumps repeat the base application id in their ACI0 (no patch id "
-        "anywhere).  Ratified 2026-11-06: packers normalize 0400… to 0100… "
-        "and derive patch/addon ids from the application id by the "
-        "console's +0x800/+0x1000+index convention; --title-id overrides."
+        "Switch 2 programs have ids in the 0400… range (their signed ACID "
+        "allows only 0400000000010000..04FFFFFFFFFFFFFF), and update dumps "
+        "repeat the base application id in their ACI0 (no patch id anywhere).  "
+        "Revised 2026-11-13 (first ratified as normalizing 0400… to 0100…): "
+        "ids are kept as the console has them; packers derive patch/addon ids "
+        "from the application id by the console's +0x800/+0x1000+index "
+        "convention, in its range; a Switch 2 Edition's program 1 keeps its "
+        "0400… id beside a 0100… application; --title-id overrides."
     ),
 }
 
@@ -194,24 +232,32 @@ def parse_file_rows(data: memoryview, count: int, offset: int) -> list[FileRow]:
 
 
 def encode_tlv(tlv_type: int, value: bytes) -> bytes:
-    if not 0 <= tlv_type <= TLV_MAX_LENGTH:
+    if not 0 <= tlv_type <= TLV_TYPE_MAX:
         raise NupError(f"TLV type {tlv_type:#x} exceeds u16")
     if len(value) > TLV_MAX_LENGTH:
         raise NupError(
-            f"TLV {tlv_type:#x} payload of {len(value)} bytes exceeds the "
-            f"u16 length cap {TLV_MAX_LENGTH} (SPEC §10.3)"
+            f"TLV {tlv_type:#x} payload of {len(value):,} bytes exceeds the "
+            f"{TLV_MAX_LENGTH:,}-byte cap of one TLV (SPEC §3)"
         )
-    return struct.pack("<HH", tlv_type, len(value)) + value
+    return TLV_HEADER.pack(tlv_type, 0, len(value)) + value
+
+
+def tlv_block_size(tlvs: dict[int, bytes]) -> int:
+    return sum(TLV_HEADER_SIZE + len(value) for value in tlvs.values())
 
 
 def parse_tlvs(data: memoryview) -> dict[int, bytes]:
     tlvs: dict[int, bytes] = {}
     pos = 0
     while pos < len(data):
-        if pos + 4 > len(data):
+        if pos + TLV_HEADER_SIZE > len(data):
             raise NupError("TLV header overruns the TLV block")
-        tlv_type, length = struct.unpack_from("<HH", data, pos)
-        pos += 4
+        tlv_type, reserved, length = TLV_HEADER.unpack_from(data, pos)
+        pos += TLV_HEADER_SIZE
+        if reserved:
+            raise NupError(f"TLV {tlv_type:#x} reserved field is not zero")
+        if length > TLV_MAX_LENGTH:
+            raise NupError(f"TLV {tlv_type:#x} of {length:,} bytes exceeds the {TLV_MAX_LENGTH:,}-byte cap (SPEC §3)")
         if pos + length > len(data):
             raise NupError(f"TLV {tlv_type:#x} value overruns the TLV block")
         tlvs[tlv_type] = bytes(data[pos : pos + length])
@@ -219,19 +265,32 @@ def parse_tlvs(data: memoryview) -> dict[int, bytes]:
     return tlvs
 
 
+def localized_tag(lang: str) -> bytes:
+    """A localized record's language tag: ASCII, at most 255 bytes (u8 length)."""
+    if not lang.isascii():
+        raise NupError(f"language tag {lang!r} is not ASCII (a BCP 47 tag, e.g. ja or en-GB)")
+    if len(lang) > 0xFF:
+        raise NupError(f"language tag {lang[:20]!r}... is longer than 255 characters")
+    return lang.encode("ascii")
+
+
 def encode_localized(records: dict[str, bytes]) -> bytes:
     out = bytearray()
     for lang in sorted(records):
-        lang_bytes = lang.encode("ascii")
+        lang_bytes = localized_tag(lang)
         value = records[lang]
         out.append(len(lang_bytes))
         out += lang_bytes
-        out += struct.pack("<H", len(value))
+        out += struct.pack("<I", len(value))
         out += value
     return bytes(out)
 
 
-def parse_localized(data: memoryview) -> dict[str, bytes]:
+def parse_localized(data: memoryview, *, lenient: bool = False) -> dict[str, bytes]:
+    """Localized records: u8 tag length, ASCII tag, u32 value length, value.
+    lenient (NUP v1's TLVs, same framing): a non-ASCII tag is read with
+    replacement characters for the caller to drop, an empty tag is skipped,
+    and the first record of a tag wins."""
     records: dict[str, bytes] = {}
     pos = 0
     while pos < len(data):
@@ -239,17 +298,34 @@ def parse_localized(data: memoryview) -> dict[str, bytes]:
             raise NupError("localized record overruns the TLV")
         lang_len = data[pos]
         pos += 1
-        if pos + lang_len + 2 > len(data):
+        if pos + lang_len > len(data):
             raise NupError("localized record overruns the TLV")
-        lang = bytes(data[pos : pos + lang_len]).decode("ascii").lower()
+        try:
+            lang = bytes(data[pos : pos + lang_len]).decode("ascii", "replace" if lenient else "strict").lower()
+        except UnicodeDecodeError:
+            raise NupError("localized record language tag is not ASCII") from None
         pos += lang_len
-        value_len, = struct.unpack_from("<H", data, pos)
-        pos += 2
+        if pos + 4 > len(data):
+            raise NupError("localized record overruns the TLV")
+        value_len, = struct.unpack_from("<I", data, pos)
+        pos += 4
         if pos + value_len > len(data):
             raise NupError("localized record value overruns the TLV")
-        records[lang] = bytes(data[pos : pos + value_len])
+        value = bytes(data[pos : pos + value_len])
+        if not lenient:
+            records[lang] = value
+        elif lang:
+            records.setdefault(lang, value)
         pos += value_len
     return records
+
+
+def merge_localized(tlvs: dict[int, bytes], tlv_type: int, lang: str, value: bytes) -> None:
+    """Set one language's record of a localized TLV; tags compare lowercased,
+    as parse_localized reads them."""
+    records = parse_localized(memoryview(tlvs.get(int(tlv_type), b"")))
+    records[lang.lower()] = value
+    tlvs[int(tlv_type)] = encode_localized(records)
 
 
 def scope_prefix(kind: Kind, version: int = 0, index: int = 0) -> str:

@@ -191,6 +191,43 @@ def test_update_content_hash_is_materialized_identity_not_table_hash(
     assert table_digest != record.content_hash
 
 
+def test_editing_a_standalone_update_keeps_its_materialized_identity(standalone_nup, tmp_path):
+    """An update file edited in a standalone container: its identity is the state it
+    produces on the container's own base, its @deleted read where the source stores
+    it, also when a base edit moves the update's entries; an edited base takes the
+    update along (it binds to the edited base), whether or not its files changed."""
+    from nup.cli import main as nup_main
+    from nup.edit import EditOps, edit_container
+
+    new = tmp_path / "new.bin"
+    new.write_bytes(b"edited in place")
+    added = tmp_path / "added.bin"
+    added.write_bytes(b"one more base file")
+    cases = {
+        "update.nup": EditOps(replace_files={"update/458752/romfs/extra.bin": str(new)}),
+        "both.nup": EditOps(replace_files={"update/458752/romfs/extra.bin": str(new)},
+                            add_files={"base/romfs/added.bin": str(added)}),
+        "base.nup": EditOps(add_files={"base/romfs/added.bin": str(added)}),
+    }
+    for name, ops in cases.items():
+        out = tmp_path / name
+        report = edit_container(str(standalone_nup), str(out), ops)
+        # the update beside the base follows it; only updates in other files are warned about
+        assert all("in other files" in line for line in report.warnings)
+        assert bool(report.warnings) == ("base/romfs/added.bin" in ops.add_files)
+        with read_container(str(out)) as reader:
+            base, record = reader.meta.packages
+            assert record.base_content_hash == base.content_hash
+            merged = {row.path: row for row in base.files}
+            merged.update({row.path: row for row in record.files if row.path != "@deleted"})
+            for path in parse_deleted_manifest_data(reader, record):
+                merged.pop(path, None)
+            assert record.content_hash == content_hash(sorted(merged.values(), key=lambda r: r.path_bytes))
+        tree = tmp_path / f"tree-{name}"
+        assert nup_main(["extract", str(out), "--apply", "-o", str(tree)]) == 0
+        assert (tree / "romfs/added.bin").exists() == ("base/romfs/added.bin" in ops.add_files)
+
+
 def parse_deleted_manifest_data(reader, record):
     offset = next(
         index for index, row in enumerate(record.files) if row.path == "@deleted"

@@ -42,10 +42,22 @@ def write_container(out_path: str, packed_packages, patch_version: int = 0) -> N
     total_files = sum(len(record.files) for record in records)
     meta_len = meta_length(records)
     blobs = [blob for packed in packed_packages for blob in packed.blobs]
+    refuse_own_source(out_path, blobs)
     entries, data_start = layout_entries(meta_len, blobs)
     prefix_padded, meta_bytes = build_prefix_and_meta(entries, records, total_files, patch_version)
     write_regions(out_path, prefix_padded, meta_bytes, blobs)
     check_written_size(out_path, data_start, meta_len, blobs)
+
+
+def refuse_own_source(out_path: str, blobs: list[Blob]) -> None:
+    """Writing out_path empties it first: a container whose bytes come from that
+    same file (`nup edit x.nup -o x.nup`) would lose them before they are copied."""
+    if not os.path.exists(out_path):
+        return
+    for source in {blob.fs_path for blob in blobs if blob.fs_path}:
+        if os.path.exists(source) and os.path.samefile(source, out_path):
+            raise NupError(f"{out_path!r} is also where this container's data is read from; "
+                           "write to another path (or leave out -o to edit in place)")
 
 
 def layout_entries(meta_len: int, blobs: list[Blob]) -> tuple[list[ContainerEntry], int]:

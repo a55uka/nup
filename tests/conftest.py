@@ -23,7 +23,7 @@ def npdm_bytes(program_id: int) -> bytes:
     header = b"META" + os.urandom(0x380 - 4)
     body = bytearray(os.urandom(0x100))
     aci0 = bytearray(b"ACI0" + bytes(12))
-    aci0 += struct.pack("<Q", (program_id & 0x00FFFFFFFFFFFFFF) | 0x0400000000000000)
+    aci0 += struct.pack("<Q", program_id)   # as the console has it: 01… a Switch program, 04… a Switch 2 one (SPEC §4)
     aci0 += bytes(aci0_offset - len(aci0) - 0x14)
     return header + body + bytes(aci0)
 

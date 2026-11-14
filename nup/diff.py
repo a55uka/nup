@@ -19,9 +19,12 @@ from .layout import (
     Kind,
     TlvType,
     content_hash,
+    encode_localized,
+    parse_localized,
     scope_prefix,
 )
 from .model import PackageRecord
+from .nacp import control_icon, control_localized_icons, control_tlvs, read_control
 from .reader import NupReader, read_container
 from .tree import (
     encode_deleted_manifest,
@@ -77,10 +80,52 @@ def build_identity_tlvs(content_dir: str) -> dict[int, bytes]:
     return tlvs
 
 
-def merged_tlvs(content_dir: str, overrides: dict[int, bytes] | None) -> dict[int, bytes]:
+def localized_merged(tlvs: dict[int, bytes], overrides: dict[int, bytes]) -> dict[int, bytes]:
+    """overrides, with their localized titles merged language by language into
+    the ones tlvs already hold: a --lang-name replaces its own language's
+    record, not the other languages the Control content names."""
+    merged = dict(overrides)
+    if TlvType.LOCALIZED_TITLE in overrides and TlvType.LOCALIZED_TITLE in tlvs:
+        records = parse_localized(memoryview(tlvs[TlvType.LOCALIZED_TITLE]))
+        records.update(parse_localized(memoryview(overrides[TlvType.LOCALIZED_TITLE])))
+        merged[TlvType.LOCALIZED_TITLE] = encode_localized(records)
+    return merged
+
+
+def merged_tlvs(content_dir: str, overrides: dict[int, bytes] | None,
+                kind: Kind = Kind.BASE, control_fallback: str | None = None) -> dict[int, bytes]:
+    """Build id, then the Control content's metadata (SPEC §3.1), then the
+    caller's explicit values, which win field by field. A base without
+    Control content of its own takes the identity TLVs, not the display
+    version, from control_fallback: the newest update of its program that
+    has one (on the console an installed update's Control replaces the
+    base's, so a dump of an installed game has only the update's)."""
     tlvs = build_identity_tlvs(content_dir)
+    control = read_control(content_dir) if kind in (Kind.BASE, Kind.UPDATE) else None
+    if control is not None:
+        tlvs.update(control_tlvs(control, identity=kind is Kind.BASE))
+    elif kind is Kind.BASE and control_fallback:
+        control = read_control(control_fallback)
+        if control is not None:
+            borrowed = control_tlvs(control, identity=True)
+            borrowed.pop(TlvType.DISPLAY_VERSION, None)   # the update's version, not the base's
+            tlvs.update(borrowed)
     if overrides:
-        tlvs.update(overrides)
+        tlvs.update(localized_merged(tlvs, overrides))
+    default_icon = control_icon(control) if control is not None and kind is Kind.BASE else None
+    if default_icon is not None and TlvType.ICON not in tlvs:
+        tlvs[TlvType.ICON] = default_icon
+    # the console's other-language icons stand beside its default one: an icon the
+    # caller gives replaces the image for every language, so none of them apply,
+    # unless it is that default icon itself (nup convert passes v1's, mostly the
+    # tree's); a --lang-icon replaces its own language's and the others stay
+    icon_given = bool(overrides) and TlvType.ICON in overrides and overrides[TlvType.ICON] != default_icon
+    if control is not None and kind is Kind.BASE and not icon_given:
+        given = tlvs.get(TlvType.LOCALIZED_ICON)
+        localized = control_localized_icons(control, tlvs.get(TlvType.ICON),
+                                            parse_localized(memoryview(given)) if given else None)
+        if localized is not None:
+            tlvs[TlvType.LOCALIZED_ICON] = localized
     return tlvs
 
 
@@ -89,7 +134,10 @@ def base_rows_of(record: PackageRecord) -> dict[str, FileRow]:
 
 
 def sorted_identity(rows) -> bytes:
-    return content_hash(sorted(rows, key=lambda row: row.path_bytes))
+    """A package state's identity (SPEC §6.2): the content hash of its rows,
+    any order (content_hash sorts them by path bytes). The one helper pack,
+    edit, extract and hashlist compute it with."""
+    return content_hash(list(rows))
 
 
 def pack_tree_package(
@@ -118,7 +166,7 @@ def pack_tree_package(
     record.files.sort(key=lambda row: row.path_bytes)
     blobs.sort(key=lambda blob: blob.name.encode("utf-8"))
     record.content_hash = sorted_identity(materialized.values())
-    return PackedPackage(record, sorted(blobs, key=lambda blob: blob.name.encode("utf-8")))
+    return PackedPackage(record, sorted(blobs, key=lambda blob: blob.name.encode("utf-8")), materialized)
 
 
 def new_package_record(package_input, first_entry_index: int, diff: bool) -> PackageRecord:
@@ -129,7 +177,9 @@ def new_package_record(package_input, first_entry_index: int, diff: bool) -> Pac
         application_id=package_input.application_id,
         version=package_input.version,
         first_entry_index=first_entry_index,
-        tlvs=merged_tlvs(package_input.content_dir, package_input.tlvs or None),
+        tlvs=merged_tlvs(package_input.content_dir, package_input.tlvs or None, package_input.kind,
+                         package_input.control_fallback),
+        program_index=package_input.program_index,
     )
 
 
@@ -199,6 +249,9 @@ def overlay_update_rows(reader: NupReader, record: PackageRecord, rows: dict[str
         if row.path == DELETED_NAME:
             entry = reader.entries[record.first_entry_index + offset]
             for removed in parse_deleted_manifest(reader.read_entry_bytes(entry)):
-                rows.pop(removed, None)
+                # as extract.apply_updates refuses it: no state is proven that no reader builds
+                if rows.pop(removed, None) is None:
+                    raise NupError(f"the v{record.version} @deleted manifest names {removed!r}, "
+                                   "which the tree does not contain")
             continue
         rows[row.path] = row

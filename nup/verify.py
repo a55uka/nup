@@ -64,9 +64,7 @@ def select_packages(reader: NupReader, selector: str | int | None):
     record index."""
     if selector is None or selector == "all":
         return list(reader.meta.packages)
-    if isinstance(selector, int):
-        return [reader.meta.packages[selector]]
-    text = str(selector)
+    text = str(selector)   # an int is a record index, as its digits are
     by_label = [
         record for record in reader.meta.packages
         if package_label(reader, record) == text
@@ -84,15 +82,15 @@ def select_packages(reader: NupReader, selector: str | int | None):
                 "label or record index"
             )
         return by_kind
-    if text.isdigit():
+    if text.isascii() and text.isdigit() and int(text) < len(reader.meta.packages):   # '²' is a digit too
         return [reader.meta.packages[int(text)]]
     raise NupError(f"no package matches {selector!r}")
 
 
 def package_label(reader: NupReader, record) -> str:
-    from .layout import scope_prefix
+    from .model import scope_of
 
-    return scope_prefix(record.kind, record.version, record.title_id - record.application_id - 0x1000)
+    return scope_of(record)
 
 
 def hash_entry(reader: NupReader, entry) -> tuple[bytes, int]:

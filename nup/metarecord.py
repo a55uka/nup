@@ -14,6 +14,7 @@ from .layout import (
     encode_tlv,
     parse_file_rows,
     parse_tlvs,
+    tlv_block_size,
 )
 from .model import MetaRecord, PackageRecord, validate_record_flags, validate_scope_contiguity
 
@@ -22,7 +23,7 @@ def meta_length(packages: list[PackageRecord]) -> int:
     length = META_HEADER_SIZE + DIGEST_SIZE
     for record in packages:
         length += PACKAGE_FIXED_SIZE
-        length += sum(4 + len(value) for value in record.tlvs.values())
+        length += tlv_block_size(record.tlvs)
         length += sum(len(row.encode()) for row in record.files)
     return length
 
@@ -61,7 +62,9 @@ def encode_package_record(record: PackageRecord) -> bytes:
     out += PACKAGE_RECORD.pack(
         record.kind.value,
         record.flags,
-        sum(4 + len(value) for value in record.tlvs.values()),
+        record.program_index,
+        0,
+        tlv_block_size(record.tlvs),
         record.title_id,
         record.application_id,
         record.version,
@@ -69,7 +72,6 @@ def encode_package_record(record: PackageRecord) -> bytes:
         record.content_hash,
         record.base_content_hash,
         record.first_entry_index,
-        0,
     )
     for tlv_type, value in sorted(record.tlvs.items()):
         out += encode_tlv(tlv_type, value)
@@ -79,12 +81,10 @@ def encode_package_record(record: PackageRecord) -> bytes:
 
 
 def validate_tlv_block_size(record: PackageRecord) -> None:
-    total = sum(4 + len(value) for value in record.tlvs.values())
-    if total > 0xFFFF:
-        raise NupError(
-            f"TLV block of {total} bytes exceeds the u16 tlv size field; the whole "
-            "block must fit 64 KiB (SPEC §3, §10.3)"
-        )
+    """Each value within the per-TLV cap (encode_tlv says which one is over); the u32 block size then always holds them"""
+    total = tlv_block_size(record.tlvs)
+    if total > 0xFFFFFFFF:
+        raise NupError(f"TLV block of {total:,} bytes exceeds the u32 tlv size field (SPEC §3)")
 
 
 def parse_meta_record(record: memoryview) -> MetaRecord:
@@ -145,17 +145,17 @@ def parse_meta_header(body: memoryview) -> dict:
 def parse_package_record(body: memoryview, pos: int) -> tuple[PackageRecord, int]:
     if pos + PACKAGE_FIXED_SIZE > len(body):
         raise NupError("package record overruns the meta record")
-    kind_value, flags, tlv_size, title_id, application_id, version, row_count, content, base_content, first_index, pkg_reserved = (
+    kind_value, flags, program_index, pkg_reserved, tlv_size, title_id, application_id, version, row_count, content, base_content, first_index = (
         PACKAGE_RECORD.unpack_from(body, pos)
     )
     pos += PACKAGE_FIXED_SIZE
-    if pkg_reserved != 0:
+    if pkg_reserved:
         raise NupError("package record reserved field is not zero")
     kind = parse_kind(kind_value)
     validate_record_flags(
         PackageRecord(kind=kind, flags=flags, title_id=title_id,
                       application_id=application_id, version=version,
-                      first_entry_index=first_index)
+                      first_entry_index=first_index, program_index=program_index)
     )
     tlv_end = pos + tlv_size
     if tlv_end > len(body):
@@ -175,6 +175,7 @@ def parse_package_record(body: memoryview, pos: int) -> tuple[PackageRecord, int
         base_content_hash=base_content,
         tlvs=tlvs,
         files=files,
+        program_index=program_index,
     )
     return record, pos
 

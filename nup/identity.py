@@ -1,24 +1,27 @@
 """Package identity extracted from dump files: NPDM program ids and NSO build ids.
 
-Switch 2 NPDMs carry program ids in the 0400… namespace while NCM title ids
-use 0100… (see SPEC_ISSUES in layout), so ids are normalized on read.
+Program ids are the console's, taken as the NPDM states them: a Switch 2
+program's are in the 0400… range (a native game's, and a Switch 2 Edition's
+program beside its Switch 1 program 0), which its signed ACID allows
+(0400000000010000..04FFFFFFFFFFFFFF), as a Switch 1 program's ACID allows
+0100…01FF… (SPEC §4, SPEC_ISSUES in layout).
 """
 
 import struct
 
 from .errors import NupError
 
-S2_NAMESPACE_MASK = 0x00FF_FFFF_FFFF_FFFF
-S1_NAMESPACE_BITS = 0x0100_0000_0000_0000
+TITLE_NUMBER_MASK = 0x00FF_FFFF_FFFF_FFFF
 BUILD_ID_OFFSET = 0x40
 BUILD_ID_SIZE = 0x20
 NPDM_HEADER_MAGIC = b"META"
 
 
-def normalize_title_id(program_id: int) -> int:
-    if program_id >> 56 == 0x04:
-        return (program_id & S2_NAMESPACE_MASK) | S1_NAMESPACE_BITS
-    return program_id
+def title_number(title_id: int) -> int:
+    """A title id without its platform byte (0x01 Switch, 0x04 Switch 2): what
+    relates a Switch 2 Edition's program 1 (0400…X001) to its application
+    (0100…X000), the console's application id + index (SPEC §4.1)."""
+    return title_id & TITLE_NUMBER_MASK
 
 
 def parse_npdm_program_id(data: bytes) -> int | None:
@@ -28,7 +31,7 @@ def parse_npdm_program_id(data: bytes) -> int | None:
     program_id, = struct.unpack_from("<Q", data, offset + 0x10)
     if program_id == 0:
         return None
-    return normalize_title_id(program_id)
+    return program_id
 
 
 def read_npdm_program_id(fs_path: str) -> int | None:

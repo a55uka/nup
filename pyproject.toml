@@ -9,6 +9,10 @@ description = "NUP v2: pack, modify, extract, inspect and verify decrypted NX du
 requires-python = ">=3.12"
 license = { text = "MIT" }
 
+[project.optional-dependencies]
+images = ["Pillow>=10"]  # nup edit --icon: convert PNGs and oversized JPEGs
+v1 = ["zstandard>=0.22; python_version < '3.14'"]  # nup convert: zstd extents of v1 files
+
 [project.scripts]
 nup = "nup.cli:main"
 

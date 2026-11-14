@@ -3,12 +3,12 @@
 import hashlib
 
 from .errors import NupError, VerificationError
-from .layout import ALIGN, DIGEST_SIZE, META_NAME, Kind, align_up, scope_prefix
+from .layout import ALIGN, DIGEST_SIZE, META_NAME, Kind, align_up
 from .model import (
     MetaRecord,
     PackageRecord,
-    addon_index,
     bind_file_tables,
+    entry_scope_name,
     parse_container_counts,
     parse_container_prefix,
     validate_grouping,
@@ -63,10 +63,23 @@ class NupReader:
                 f"data region starts at {self.data_start:#x}: the string table must be "
                 "padded so entry data lands on 0x200 boundaries"
             )
-        for entry in self.entries:
+        for index, entry in enumerate(self.entries):
             if entry.data_offset % ALIGN:
                 raise NupError(f"entry {entry.name!r} data offset is not 0x200-aligned")
+            if self.data_start + entry.data_offset + entry.size > self.file_size:
+                raise NupError(f"entry {entry.name!r} lies outside the container (SPEC §6.4)")
+            expected = 0 if index == 0 else min(entry.size, ALIGN)
+            if entry.hashed_size != expected:
+                raise NupError(
+                    f"entry {entry.name!r} hashed size {entry.hashed_size:#x} is not {expected:#x} (SPEC §2)"
+                )
         self._index_by_name = {entry.name: i for i, entry in enumerate(self.entries)}
+        if len(self._index_by_name) != len(self.entries):
+            seen: set[str] = set()
+            for entry in self.entries:
+                if entry.name in seen:
+                    raise NupError(f"entry name {entry.name!r} appears twice (SPEC §6.4)")
+                seen.add(entry.name)
         if self.entries[0].name != META_NAME:
             raise NupError("the first container entry is not meta.nup")
         for entry in self.entries[1:]:
@@ -162,8 +175,7 @@ class NupReader:
         raise NupError(f"no package scope owns entry index {index}")
 
     def entry_name_of(self, record: PackageRecord, offset: int) -> str:
-        prefix = scope_prefix(record.kind, record.version, addon_index(record))
-        return f"{prefix}/{record.files[offset].path}"
+        return entry_scope_name(record, record.files[offset].path)
 
     def verify_entry_table_hashes(self) -> None:
         for entry in self.entries[1:]:

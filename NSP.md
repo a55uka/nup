@@ -241,10 +241,10 @@ decrypted.
 
 ## 6. Worked example - Donkey Kong Bananza
 
-Title `010074A01BF12000`, update `010074A01BF12800`.
+Title `040074A01BF12000`, update `040074A01BF12800`.
 
 ```
-010074A01BF12800.cnmt        ContentMetaType 0x81 (Patch), version 458752
+040074A01BF12800.cnmt        ContentMetaType 0x81 (Patch), version 458752
 <id>.nca  ContentType 1 (Program)   ExeFS: main 22.5 MB, main.npdm, rtld, sdk
                                     RomFS section: full game data
 <id>.nca  ContentType 0 (Meta)      holds the .cnmt + fragment table

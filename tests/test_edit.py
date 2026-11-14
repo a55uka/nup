@@ -112,14 +112,26 @@ def test_edited_container_verifies_full(base_nup, tmp_path):
         verify_container(reader, "full")
 
 
-def test_update_edit_without_base_warns_but_verifies_structure(update_nup, tmp_path):
+def test_update_tlv_edit_keeps_the_materialized_identity(update_nup, tmp_path):
     from nup.verify import verify_container
 
     out = tmp_path / "upd-edited.nup"
     report = edit_container(
         str(update_nup), str(out), EditOps(package_selector="update", set_tlvs={int(TlvType.DISPLAY_VERSION): b"4.0.0"})
     )
-    assert report.warnings
-    with read_container(str(out)) as reader:
+    assert not report.warnings  # no file changed: no --base needed
+    with read_container(str(update_nup)) as before, read_container(str(out)) as reader:
         assert reader.meta.packages[0].tlvs[TlvType.DISPLAY_VERSION] == b"4.0.0"
+        assert reader.meta.packages[0].content_hash == before.meta.packages[0].content_hash
         verify_container(reader, "full")
+
+
+def test_update_file_edit_without_base_warns(update_nup, tmp_path):
+    extra = tmp_path / "extra.bin"
+    extra.write_bytes(b"extra")
+    with read_container(str(update_nup)) as reader:
+        version = reader.meta.packages[0].version
+    report = edit_container(str(update_nup), str(tmp_path / "upd-edited.nup"),
+                            EditOps(package_selector="update",
+                                    add_files={f"update/{version}/romfs/added-by-edit.bin": str(extra)}))
+    assert report.warnings

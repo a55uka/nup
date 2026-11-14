@@ -1,6 +1,9 @@
 """Container info: JSON-ready description and a human rendering."""
 
-from .layout import TlvType, TEXT_TLV_TYPES, parse_localized, scope_prefix
+from .errors import NupError
+from .identity import title_number
+from .layout import ADDON_OFFSET, PATCH_OFFSET, TlvType, TEXT_TLV_TYPES, parse_localized
+from .model import scope_of
 from .reader import NupReader
 
 
@@ -36,10 +39,11 @@ def container_info(reader: NupReader, *, include_entries: bool = False) -> dict:
 
 
 def package_info(reader: NupReader, record) -> dict:
-    scope = scope_prefix(record.kind, record.version, record.title_id - record.application_id - 0x1000)
+    scope = scope_of(record)
     payload = {
         "kind": record.kind.name.lower(),
         "scope": scope,
+        "program_index": record.program_index,
         "title_id": f"{record.title_id:016x}",
         "application_id": f"{record.application_id:016x}",
         "version": record.version,
@@ -54,15 +58,24 @@ def package_info(reader: NupReader, record) -> dict:
         "content_hash": record.content_hash.hex(),
         "base_content_hash": render_base_hash(record),
         "tlv_types": sorted(record.tlvs),
-        "localized_languages": sorted(
-            parse_localized(record.tlvs[TlvType.LOCALIZED_TITLE])
-        ) if TlvType.LOCALIZED_TITLE in record.tlvs else [],
+        "localized_languages": localized_languages(record),
         "conformance": conformance_notes(reader, record),
     }
     icon = record.tlvs.get(TlvType.ICON)
     if icon is not None:
         payload["icon_bytes"] = len(icon)
     return payload
+
+
+def localized_languages(record) -> list[str]:
+    """Languages of the localized title TLV; a malformed one is reported, not fatal (PR #37)."""
+    value = record.tlvs.get(TlvType.LOCALIZED_TITLE)
+    if value is None:
+        return []
+    try:
+        return sorted(parse_localized(memoryview(value)))
+    except NupError:
+        return []
 
 
 def render_base_hash(record) -> str:
@@ -81,14 +94,26 @@ def decode_text(tlvs: dict[int, bytes], tlv_type: int) -> str | None:
 def conformance_notes(reader: NupReader, record) -> list[str]:
     notes = []
     application = record.application_id or app_id_of(reader, record)
-    if record.kind.name == "BASE" and record.title_id % 0x1000:
+    if record.kind.name == "BASE" and not record.program_index and record.title_id % 0x1000:
         notes.append("base title id does not end in 000 (SPEC §4)")
-    if record.kind.name == "UPDATE" and application and record.title_id != application + 0x800:
-        notes.append("update title id is not application id + 0x800 (SPEC §4)")
+    # a program's id may be in another platform's range than its application's
+    # (a Switch 2 Edition's program 1): compared without the platform byte (SPEC §4.1)
+    if record.kind.name == "UPDATE" and application and \
+            title_number(record.title_id) != title_number(application) + record.program_index + PATCH_OFFSET:
+        notes.append("update title id is not its program's id (application id + program index) "
+                     "+ 0x800 (SPEC §4, §4.1)")
     if record.kind.name == "ADDON" and application:
-        index = record.title_id - application - 0x1000
+        index = record.title_id - application - ADDON_OFFSET
         if index < 0:
             notes.append("add-on title id is not application id + 0x1000 + index (SPEC §4)")
+    if record.program_index and record.kind.name == "BASE" and \
+            title_number(record.title_id) != title_number(application) + record.program_index:
+        notes.append("program title id is not application id + program index (SPEC §4.1)")
+    if TlvType.LOCALIZED_TITLE in record.tlvs:
+        try:
+            parse_localized(memoryview(record.tlvs[TlvType.LOCALIZED_TITLE]))
+        except NupError as error:
+            notes.append(f"localized title TLV is malformed: {error} (SPEC §3)")
     return notes
 
 
@@ -114,7 +139,8 @@ def render_info(info: dict) -> str:
 
 def package_line(package: dict) -> str:
     parts = [
-        f"  [{package['kind']}] scope {package['scope']}/",
+        f"  [{package['kind']}] scope {package['scope']}/"
+        + (f" program {package['program_index']}" if package["program_index"] else ""),
         f"title {package['title_id']}",
         f"app {package['application_id']}",
         f"version {package['version']}",

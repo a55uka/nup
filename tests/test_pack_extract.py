@@ -91,6 +91,10 @@ def test_packing_is_deterministic(base_dump, tmp_path):
 
 
 def test_case_sensitive_names_survive(base_dump, tmp_path):
+    from nup.tree import case_insensitive
+
+    if case_insensitive(str(base_dump / "romfs")):
+        pytest.skip("this folder folds case: it cannot hold the two dump files (default Windows and macOS)")
     target = base_dump / "romfs" / "Case.bin"
     target.write_bytes(b"upper")
     (base_dump / "romfs" / "case.bin").write_bytes(b"lower")

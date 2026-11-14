@@ -15,12 +15,12 @@ from .layout import (
     DELETED_NAME,
     FileRow,
     Kind,
-    content_hash,
-    scope_prefix,
+    PATCH_OFFSET,
 )
-from .model import addon_index
+from .diff import sorted_identity
+from .model import scope_of
 from .reader import NupReader
-from .tree import parse_deleted_manifest
+from .tree import check_extract_paths, parse_deleted_manifest, safe_target
 
 
 @dataclass(slots=True)
@@ -43,10 +43,6 @@ Locator = tuple[NupReader, int]
 State = dict[str, tuple[FileRow, Locator]]
 
 
-def scope_of(record) -> str:
-    return scope_prefix(record.kind, record.version, addon_index(record))
-
-
 def extract_package(
     reader: NupReader,
     record,
@@ -55,11 +51,13 @@ def extract_package(
     flatten: bool = False,
     verify: bool = True,
 ) -> ExtractReport:
-    target_root = out_dir if flatten else os.path.join(out_dir, scope_of(record))
+    # the scope folders (base/, update/<v>/) are written through as the files are: never a link
+    target_root = out_dir if flatten else safe_target(out_dir, scope_of(record))
     report = ExtractReport(roots=[target_root])
+    check_extract_paths(target_root, [row.path for row in record.files])
     for offset, row in enumerate(record.files):
         entry = reader.entries[record.first_entry_index + offset]
-        target = Path(target_root, *row.path.split("/"))
+        target = Path(safe_target(target_root, row.path))
         target.parent.mkdir(parents=True, exist_ok=True)
         copy_verified(reader, entry, row, target, verify)
         report.files_written += 1
@@ -100,6 +98,11 @@ def materialize(
     §5.1).  Each diff's base content hash must equal the materialized
     identity it lands on; @deleted manifests are consumed, not written.
     """
+    if any(record.kind is Kind.ADDON_UPDATE for record in reader.meta.packages):
+        if chain:
+            raise NupError("--chain lists update containers; an add-on update container "
+                           "chains its own add-on updates")
+        return materialize_addon_updates(reader, out_dir, base_reader, verify)
     updates = sorted(
         (record for record in reader.meta.packages if record.kind is Kind.UPDATE),
         key=lambda record: record.version,
@@ -124,6 +127,52 @@ def materialize(
         report.roots.append(out_dir)
     for record in addons:
         report.merge(extract_package(reader, record, out_dir, verify=verify))
+    return report
+
+
+def materialize_addon_updates(
+    reader: NupReader,
+    out_dir: str,
+    base_reader: NupReader | None,
+    verify: bool,
+) -> ExtractReport:
+    """Add-ons with their data patches applied (SPEC §5.4): in version order,
+    each add-on update lands on the add-on whose materialized state its base
+    content hash names; when add-ons share a state, on the one its id names
+    (data patch id = add-on id + 0x800), an error when it names none of them.
+    Every add-on update must land."""
+    if base_reader is None:
+        raise NupError("materializing an add-on update container requires --base <dlc.nup>")
+    patches = sorted(
+        (record for record in reader.meta.packages if record.kind is Kind.ADDON_UPDATE),
+        key=lambda record: record.version,
+    )
+    report = ExtractReport()
+    addons = [record for record in base_reader.meta.packages if record.kind is Kind.ADDON]
+    states = [initial_state(base_reader, addon) for addon in addons]
+    identities = [identity_of(state) for state in states]   # only a patched state's changes
+    for patch in patches:
+        landing = [i for i, identity in enumerate(identities) if identity == patch.base_content_hash]
+        if not landing:
+            raise NupError(
+                f"add-on update {patch.title_id:#x} v{patch.version} lands on no add-on "
+                "of the base container (base content hash)"
+            )
+        named = [i for i in landing if addons[i].title_id == patch.title_id - PATCH_OFFSET]
+        if not named and len(landing) > 1:
+            raise NupError(
+                f"add-on update {patch.title_id:#x} v{patch.version} lands on "
+                f"{len(landing)} add-ons with the same state "
+                f"({', '.join(f'{addons[i].title_id:#x}' for i in landing)}), and its id "
+                "is none of theirs + 0x800: which one it patches is ambiguous"
+            )
+        owner = (named or landing)[0]
+        apply_updates(reader, [patch], states[owner], report)
+        identities[owner] = identity_of(states[owner])
+    for addon, state in zip(addons, states):
+        target = safe_target(out_dir, scope_of(addon))
+        write_state(state, target, verify, report)
+        report.roots.append(target)
     return report
 
 
@@ -181,16 +230,16 @@ def apply_updates(reader: NupReader, updates, state: State, report: ExtractRepor
         report.applied_versions.append(record.version)
 
 
-def identity_of(state: State) -> int:
-    rows = [state[path][0] for path in sorted(state)]
-    return content_hash(rows)
+def identity_of(state: State) -> bytes:
+    return sorted_identity(row for row, _source in state.values())
 
 
 def write_state(state: State, out_dir: str, verify: bool, report: ExtractReport) -> None:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+    check_extract_paths(out_dir, list(state))
     for path, (row, (reader, index)) in sorted(state.items()):
         entry = reader.entries[index]
-        target = Path(out_dir, *path.split("/"))
+        target = Path(safe_target(out_dir, path))
         target.parent.mkdir(parents=True, exist_ok=True)
         copy_verified(reader, entry, row, target, verify)
         report.files_written += 1

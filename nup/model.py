@@ -8,13 +8,16 @@ import hashlib
 
 from .errors import NupError
 from .layout import (
+    ADDON_OFFSET,
     CONTAINER_ENTRY,
     CONTAINER_HEADER,
+    DIFF_KINDS,
     Flags,
     HFS0_MAGIC,
     HEADER_SIZE,
     ENTRY_SIZE,
     Kind,
+    PROGRAM_INDEX_MAX,
     scope_prefix,
 )
 from .layout import FileRow, ZERO_DIGEST, align_up, content_hash
@@ -41,6 +44,7 @@ class PackageRecord:
     base_content_hash: bytes = ZERO_DIGEST
     tlvs: dict[int, bytes] = field(default_factory=dict)
     files: list[FileRow] = field(default_factory=list)
+    program_index: int = 0  # SPEC §4.1
 
     @property
     def is_diff(self) -> bool:
@@ -164,24 +168,37 @@ def parse_entry_name(table: bytes, index: int, name_offset: int) -> str:
 
 
 def validate_record_flags(record: PackageRecord) -> None:
-    if record.kind is Kind.UPDATE and not record.is_diff:
-        raise NupError("an update package must carry the diff flag")
-    if record.kind is not Kind.UPDATE and record.is_diff:
-        raise NupError(f"only update packages may carry the diff flag (kind {record.kind})")
+    if record.kind in DIFF_KINDS and not record.is_diff:
+        raise NupError(f"a {record.kind.name.lower()} package must carry the diff flag")
+    if record.kind not in DIFF_KINDS and record.is_diff:
+        raise NupError(f"only update and add-on update packages may carry the diff flag (kind {record.kind})")
+    if not 0 <= record.program_index <= PROGRAM_INDEX_MAX:
+        raise NupError(f"program index {record.program_index} does not fit the package record "
+                       f"(at most {PROGRAM_INDEX_MAX}, SPEC §4.1)")
+    if record.program_index and record.kind not in (Kind.BASE, Kind.UPDATE):
+        raise NupError(f"only base and update packages have a program index (kind {record.kind})")
+    if record.program_index and not record.application_id:
+        raise NupError(f"program {record.program_index} package {record.title_id:#x} has no "
+                       "application id (SPEC §4.1)")
 
 
 def validate_grouping(packages: list[PackageRecord]) -> None:
     """SPEC §1 rule 7 / §3: one package group per file.  A container holds a
-    base, a single update (optionally with its base, SPEC §5.3), or any
-    number of add-ons sharing one application id."""
+    base, a single update (optionally with its base, SPEC §5.3), any number
+    of add-ons sharing one application id, or any number of add-on updates
+    (SPEC §5.4); every package of a container belongs to one program (§4.1)."""
+    if len({record.program_index for record in packages}) > 1:
+        raise NupError("a container holds the packages of one program (SPEC §4.1)")
     kinds = sorted(record.kind for record in packages)
     if len(packages) <= 1 or all(kind is Kind.ADDON for kind in kinds):
+        return
+    if all(kind is Kind.ADDON_UPDATE for kind in kinds):
         return
     if kinds == [Kind.BASE, Kind.UPDATE]:
         return
     raise NupError(
-        "a container may hold one base, a base+update pair (SPEC §5.3), or "
-        "add-ons only (SPEC §1 rule 7)"
+        "a container may hold one base, a base+update pair (SPEC §5.3), "
+        "add-ons only (SPEC §1 rule 7), or add-on updates only (SPEC §5.4)"
     )
 
 
@@ -217,12 +234,18 @@ def bind_package_file_table(entries: list[ContainerEntry], record: PackageRecord
             )
 
 
+def scope_of(record: PackageRecord) -> str:
+    """A package's scope label and entry prefix (SPEC §4): base, update/<v>,
+    addon/<i>, addonupdate/<i>/<v>. The one place it is worked out."""
+    return scope_prefix(record.kind, record.version, addon_index(record))
+
+
 def entry_scope_name(record: PackageRecord, path: str) -> str:
-    return f"{scope_prefix(record.kind, record.version, addon_index(record))}/{path}"
+    return f"{scope_of(record)}/{path}"
 
 
 def addon_index(record: PackageRecord) -> int:
-    return record.title_id - record.application_id - 0x1000
+    return record.title_id - record.application_id - ADDON_OFFSET
 
 
 def empty_prefix_hash() -> bytes:
